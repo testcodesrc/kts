@@ -1,0 +1,948 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KTS Transport Management</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #151515;
+            color: white;
+        }
+        .main-container {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .scroll-container {
+            overflow-y: auto;
+            flex-grow: 1;
+            padding: 1.5rem;
+        }
+        input, select, textarea {
+            background-color: #ffffff;
+            color: #151515;
+            border: none;
+            border-radius: 0.5rem;
+            padding: 0.5rem 1rem;
+            outline: none;
+        }
+        input:focus, select:focus, textarea:focus {
+            outline: 2px solid #46a5ff;
+        }
+    </style>
+</head>
+<body class="bg-[#151515] text-white">
+
+    <!-- Tailwind CSS configuration for custom colors -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'primary-bg': '#151515',
+                        'accent-blue': '#46a5ff',
+                        'card-bg': '#2a2a2a',
+                    },
+                    fontFamily: {
+                        'inter': ['Inter', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs, orderBy, getCountFromServer } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        let db, auth;
+        let userId;
+
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        async function initFirebase() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                console.log("Firebase initialized.");
+
+                // Sign in with custom token if available, otherwise sign in anonymously
+                const token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                if (token) {
+                    await signInWithCustomToken(auth, token);
+                    console.log("Signed in with custom token.");
+                } else {
+                    await signInAnonymously(auth);
+                    console.log("Signed in anonymously.");
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        console.log("Auth state changed. User ID:", userId);
+                        document.getElementById('user-id-display').textContent = 'User ID: ' + userId;
+                        // Initial data load after auth is ready
+                        loadVehicles();
+                        loadTrips();
+                        loadVehicleExpenses();
+                        loadOfficeExpenses();
+                    } else {
+                        userId = null;
+                        console.log("User is signed out.");
+                        // Handle signed out state if needed
+                    }
+                });
+
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                document.getElementById('error-message').textContent = `Firebase initialization error: ${error.message}`;
+            }
+        }
+        
+        // Modal logic
+        const modal = document.getElementById('modal');
+        const modalMessage = document.getElementById('modal-message');
+        const closeModal = () => modal.classList.add('hidden');
+        document.getElementById('close-modal-btn').onclick = closeModal;
+
+        function showModal(message) {
+            modalMessage.textContent = message;
+            modal.classList.remove('hidden');
+        }
+
+        // Section switching logic
+        const sections = ['home', 'vehicles', 'trips', 'vehicle-expenses', 'office-expenses'];
+        const navLinks = document.querySelectorAll('.nav-link');
+
+        function showSection(sectionId) {
+            sections.forEach(id => {
+                const section = document.getElementById(id);
+                if (section) {
+                    section.classList.toggle('hidden', id !== sectionId);
+                }
+            });
+            navLinks.forEach(link => {
+                link.classList.toggle('bg-accent-blue', link.dataset.section === sectionId);
+                link.classList.toggle('bg-gray-800', link.dataset.section !== sectionId);
+            });
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            initFirebase();
+            showSection('home');
+        });
+
+        navLinks.forEach(link => {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                showSection(e.target.dataset.section);
+            });
+        });
+
+        // --- Firestore Data Operations ---
+
+        // Function to create a document path based on privacy
+        function getCollection(collectionName, isPublic = true) {
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            const userId = auth.currentUser?.uid || 'anonymous';
+            if (isPublic) {
+                return collection(db, `artifacts/${appId}/public/data/${collectionName}`);
+            } else {
+                return collection(db, `artifacts/${appId}/users/${userId}/${collectionName}`);
+            }
+        }
+
+        // --- Vehicle & Driver Logic ---
+        const vehiclesContainer = document.getElementById('vehicles-container');
+        const addVehicleForm = document.getElementById('add-vehicle-form');
+        const addVehicleBtn = document.getElementById('add-vehicle-btn');
+        const addVehicleSection = document.getElementById('add-vehicle-section');
+        const vehiclesSection = document.getElementById('vehicles');
+
+        addVehicleBtn.addEventListener('click', () => {
+            vehiclesSection.classList.add('hidden');
+            addVehicleSection.classList.remove('hidden');
+            addVehicleForm.reset();
+            document.getElementById('vehicle-form-title').textContent = 'Add New Vehicle';
+        });
+
+        document.getElementById('back-to-vehicles').addEventListener('click', () => {
+            vehiclesSection.classList.remove('hidden');
+            addVehicleSection.classList.add('hidden');
+        });
+
+        addVehicleForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(addVehicleForm);
+            const data = Object.fromEntries(formData.entries());
+            const vehicleId = data.id;
+            
+            try {
+                if (vehicleId) {
+                    await setDoc(doc(getCollection('vehicles'), vehicleId), data);
+                    showModal('Vehicle updated successfully!');
+                } else {
+                    await addDoc(getCollection('vehicles'), data);
+                    showModal('Vehicle added successfully!');
+                }
+                addVehicleForm.reset();
+                vehiclesSection.classList.remove('hidden');
+                addVehicleSection.classList.add('hidden');
+            } catch (e) {
+                console.error("Error adding/updating document: ", e);
+                showModal('Error saving vehicle. Please try again.');
+            }
+        });
+
+        function createVehicleCard(vehicle) {
+            const card = document.createElement('div');
+            card.className = 'bg-gray-800 rounded-lg p-6 shadow-md border border-gray-700 flex flex-col justify-between';
+            card.innerHTML = `
+                <div class="flex-grow">
+                    <h3 class="text-xl font-bold text-accent-blue mb-2">${vehicle.vehicle_name}</h3>
+                    <p class="text-sm text-white"><i class="fas fa-id-badge mr-2"></i>Registration No: ${vehicle.reg_no}</p>
+                    <p class="text-sm text-white"><i class="fas fa-user-circle mr-2"></i>Driver: ${vehicle.driver_name || 'N/A'}</p>
+                    <p class="text-sm text-white"><i class="fas fa-phone mr-2"></i>Contact: ${vehicle.driver_contact || 'N/A'}</p>
+                    <p class="text-sm text-white mt-4">Loan Remaining: <span class="text-red-400 font-semibold">$${vehicle.loan_remaining || '0'}</span></p>
+                </div>
+                <div class="mt-4 flex space-x-2">
+                    <button class="edit-btn bg-accent-blue hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-full w-full transition-colors duration-200" data-id="${vehicle.id}">Edit</button>
+                    <button class="delete-btn bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded-full w-full transition-colors duration-200" data-id="${vehicle.id}">Delete</button>
+                </div>
+            `;
+            card.querySelector('.edit-btn').addEventListener('click', () => editVehicle(vehicle));
+            card.querySelector('.delete-btn').addEventListener('click', () => deleteVehicle(vehicle.id));
+            return card;
+        }
+
+        function editVehicle(vehicle) {
+            document.getElementById('vehicle-form-title').textContent = 'Edit Vehicle Details';
+            addVehicleForm.elements['id'].value = vehicle.id;
+            addVehicleForm.elements['vehicle_name'].value = vehicle.vehicle_name;
+            addVehicleForm.elements['reg_no'].value = vehicle.reg_no;
+            addVehicleForm.elements['ins_expiry'].value = vehicle.ins_expiry;
+            addVehicleForm.elements['fitness_expiry'].value = vehicle.fitness_expiry;
+            addVehicleForm.elements['puc_expiry'].value = vehicle.puc_expiry;
+            addVehicleForm.elements['driver_name'].value = vehicle.driver_name;
+            addVehicleForm.elements['driver_contact'].value = vehicle.driver_contact;
+            addVehicleForm.elements['driver_alt_contact'].value = vehicle.driver_alt_contact;
+            addVehicleForm.elements['driver_experience'].value = vehicle.driver_experience;
+            addVehicleForm.elements['driver_adhar'].value = vehicle.driver_adhar;
+            addVehicleForm.elements['loan_total'].value = vehicle.loan_total;
+            addVehicleForm.elements['loan_paid'].value = vehicle.loan_paid;
+            // The loan remaining is calculated and displayed, not stored
+            vehiclesSection.classList.add('hidden');
+            addVehicleSection.classList.remove('hidden');
+        }
+
+        async function deleteVehicle(id) {
+            if (confirm('Are you sure you want to delete this vehicle?')) {
+                try {
+                    await deleteDoc(doc(getCollection('vehicles'), id));
+                    showModal('Vehicle deleted successfully!');
+                } catch (e) {
+                    console.error("Error deleting document: ", e);
+                    showModal('Error deleting vehicle. Please try again.');
+                }
+            }
+        }
+
+        function loadVehicles() {
+            const q = query(getCollection('vehicles'));
+            onSnapshot(q, (querySnapshot) => {
+                vehiclesContainer.innerHTML = '';
+                querySnapshot.forEach((doc) => {
+                    const vehicle = { id: doc.id, ...doc.data() };
+                    vehiclesContainer.appendChild(createVehicleCard(vehicle));
+                });
+            });
+        }
+
+        // --- Trip Logic ---
+        const tripsTableBody = document.getElementById('trips-table-body');
+        const tripsForm = document.getElementById('trips-form');
+        const filterTripsBtn = document.getElementById('filter-trips-btn');
+        const tripVehicleFilter = document.getElementById('trip-vehicle-filter');
+        const tripDateFilter = document.getElementById('trip-date-filter');
+        const tripFromDate = document.getElementById('trip-from-date');
+        const tripToDate = document.getElementById('trip-to-date');
+
+        // Dynamically populate vehicle options for filters
+        function updateVehicleFilters() {
+            const vehicleCollection = getCollection('vehicles');
+            onSnapshot(vehicleCollection, (snapshot) => {
+                const vehicles = snapshot.docs.map(doc => doc.data().vehicle_name);
+                tripVehicleFilter.innerHTML = '<option value="">All Vehicles</option>';
+                vehicles.forEach(vehicle => {
+                    const option = document.createElement('option');
+                    option.value = vehicle;
+                    option.textContent = vehicle;
+                    tripVehicleFilter.appendChild(option);
+                });
+            });
+        }
+        
+        updateVehicleFilters();
+
+        filterTripsBtn.addEventListener('click', () => {
+            loadTrips();
+        });
+
+        tripsForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(tripsForm);
+            const data = Object.fromEntries(formData.entries());
+            data.date = new Date().toISOString().split('T')[0]; // Auto-set date
+            
+            try {
+                await addDoc(getCollection('trips'), data);
+                showModal('Trip added successfully!');
+                tripsForm.reset();
+            } catch (e) {
+                console.error("Error adding trip: ", e);
+                showModal('Error saving trip. Please try again.');
+            }
+        });
+
+        function loadTrips() {
+            let q = query(getCollection('trips'));
+            
+            const vehicleFilter = tripVehicleFilter.value;
+            const dateFilter = tripDateFilter.value;
+            
+            if (vehicleFilter) {
+                q = query(q, where('vehicle', '==', vehicleFilter));
+            }
+            
+            const now = new Date();
+            let fromDate, toDate;
+            
+            if (dateFilter === 'Last 7 Days') {
+                fromDate = new Date(now.setDate(now.getDate() - 7));
+            } else if (dateFilter === 'Last 30 Days') {
+                fromDate = new Date(now.setDate(now.getDate() - 30));
+            } else if (dateFilter === 'Last 6 Months') {
+                fromDate = new Date(now.setMonth(now.getMonth() - 6));
+            } else if (dateFilter === 'Last 12 Months') {
+                fromDate = new Date(now.setFullYear(now.getFullYear() - 1));
+            }
+
+            // Filtering by date range needs to be done manually as Firestore doesn't support
+            // compound queries on different fields without an index, and we want to avoid
+            // adding indexes for this simple example.
+            
+            onSnapshot(q, (querySnapshot) => {
+                tripsTableBody.innerHTML = '';
+                let totalIncome = 0;
+                let totalExpense = 0;
+                
+                const allTrips = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                
+                // Manual date filtering
+                const filteredTrips = allTrips.filter(trip => {
+                    if (!fromDate || !trip.date) return true;
+                    const tripDate = new Date(trip.date);
+                    return tripDate >= fromDate;
+                });
+
+                filteredTrips.forEach(trip => {
+                    const row = tripsTableBody.insertRow();
+                    row.className = 'border-t border-gray-700 hover:bg-gray-800';
+                    row.innerHTML = `
+                        <td class="py-3 px-4">${trip.date}</td>
+                        <td class="py-3 px-4">${trip.vehicle}</td>
+                        <td class="py-3 px-4">${trip.destination}</td>
+                        <td class="py-3 px-4">${trip.income}</td>
+                        <td class="py-3 px-4">${trip.expense}</td>
+                        <td class="py-3 px-4 flex space-x-2">
+                            <button class="delete-trip-btn text-red-500 hover:text-red-700 transition-colors duration-200" data-id="${trip.id}"><i class="fas fa-trash-alt"></i></button>
+                        </td>
+                    `;
+                    row.querySelector('.delete-trip-btn').addEventListener('click', () => deleteTrip(trip.id));
+
+                    totalIncome += parseFloat(trip.income) || 0;
+                    totalExpense += parseFloat(trip.expense) || 0;
+                });
+                
+                document.getElementById('trip-income-total').textContent = `₹${totalIncome.toFixed(2)}`;
+                document.getElementById('trip-expense-total').textContent = `₹${totalExpense.toFixed(2)}`;
+                document.getElementById('trip-profit-total').textContent = `₹${(totalIncome - totalExpense).toFixed(2)}`;
+                document.getElementById('trip-profit-total').classList.toggle('text-red-400', (totalIncome - totalExpense) < 0);
+                document.getElementById('trip-profit-total').classList.toggle('text-green-400', (totalIncome - totalExpense) >= 0);
+            });
+        }
+        
+        async function deleteTrip(id) {
+            if (confirm('Are you sure you want to delete this trip record?')) {
+                try {
+                    await deleteDoc(doc(getCollection('trips'), id));
+                    showModal('Trip record deleted successfully!');
+                } catch (e) {
+                    console.error("Error deleting trip: ", e);
+                    showModal('Error deleting trip record. Please try again.');
+                }
+            }
+        }
+        
+        // --- Vehicle Expenses Logic ---
+        const vehicleExpensesForm = document.getElementById('vehicle-expenses-form');
+        const vehicleExpensesTableBody = document.getElementById('vehicle-expenses-table-body');
+        const vehicleExpensesVehicleFilter = document.getElementById('vehicle-expenses-vehicle-filter');
+        const vehicleExpensesDateFilter = document.getElementById('vehicle-expenses-date-filter');
+
+        function updateVehicleExpensesFilters() {
+            const vehicleCollection = getCollection('vehicles');
+            onSnapshot(vehicleCollection, (snapshot) => {
+                const vehicles = snapshot.docs.map(doc => doc.data().vehicle_name);
+                vehicleExpensesVehicleFilter.innerHTML = '<option value="">All Vehicles</option>';
+                vehicles.forEach(vehicle => {
+                    const option = document.createElement('option');
+                    option.value = vehicle;
+                    option.textContent = vehicle;
+                    vehicleExpensesVehicleFilter.appendChild(option);
+                });
+            });
+        }
+        updateVehicleExpensesFilters();
+
+        document.getElementById('filter-vehicle-expenses-btn').addEventListener('click', () => {
+            loadVehicleExpenses();
+        });
+
+        vehicleExpensesForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(vehicleExpensesForm);
+            const data = Object.fromEntries(formData.entries());
+            data.date = new Date().toISOString().split('T')[0]; // Auto-set date
+            
+            try {
+                await addDoc(getCollection('vehicle_expenses'), data);
+                showModal('Vehicle expense added successfully!');
+                vehicleExpensesForm.reset();
+            } catch (e) {
+                console.error("Error adding vehicle expense: ", e);
+                showModal('Error saving vehicle expense. Please try again.');
+            }
+        });
+
+        function loadVehicleExpenses() {
+            let q = query(getCollection('vehicle_expenses'));
+            
+            const vehicleFilter = vehicleExpensesVehicleFilter.value;
+            const dateFilter = vehicleExpensesDateFilter.value;
+            
+            if (vehicleFilter) {
+                q = query(q, where('vehicle', '==', vehicleFilter));
+            }
+            
+            const now = new Date();
+            let fromDate, toDate;
+            
+            if (dateFilter === 'Last 7 Days') {
+                fromDate = new Date(now.setDate(now.getDate() - 7));
+            } else if (dateFilter === 'Last 30 Days') {
+                fromDate = new Date(now.setDate(now.getDate() - 30));
+            } else if (dateFilter === 'Last 6 Months') {
+                fromDate = new Date(now.setMonth(now.getMonth() - 6));
+            } else if (dateFilter === 'Last 12 Months') {
+                fromDate = new Date(now.setFullYear(now.getFullYear() - 1));
+            }
+            
+            onSnapshot(q, (querySnapshot) => {
+                vehicleExpensesTableBody.innerHTML = '';
+                let totalAmount = 0;
+                
+                const allExpenses = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+                const filteredExpenses = allExpenses.filter(expense => {
+                    if (!fromDate || !expense.date) return true;
+                    const expenseDate = new Date(expense.date);
+                    return expenseDate >= fromDate;
+                });
+
+                filteredExpenses.forEach(expense => {
+                    const row = vehicleExpensesTableBody.insertRow();
+                    row.className = 'border-t border-gray-700 hover:bg-gray-800';
+                    row.innerHTML = `
+                        <td class="py-3 px-4">${expense.date}</td>
+                        <td class="py-3 px-4">${expense.vehicle}</td>
+                        <td class="py-3 px-4">${expense.expense_type}</td>
+                        <td class="py-3 px-4">${expense.details}</td>
+                        <td class="py-3 px-4">₹${expense.amount}</td>
+                        <td class="py-3 px-4 flex space-x-2">
+                            <button class="delete-expense-btn text-red-500 hover:text-red-700 transition-colors duration-200" data-id="${expense.id}"><i class="fas fa-trash-alt"></i></button>
+                        </td>
+                    `;
+                    row.querySelector('.delete-expense-btn').addEventListener('click', () => deleteVehicleExpense(expense.id));
+
+                    totalAmount += parseFloat(expense.amount) || 0;
+                });
+                document.getElementById('vehicle-expense-total').textContent = `₹${totalAmount.toFixed(2)}`;
+            });
+        }
+        
+        async function deleteVehicleExpense(id) {
+            if (confirm('Are you sure you want to delete this expense record?')) {
+                try {
+                    await deleteDoc(doc(getCollection('vehicle_expenses'), id));
+                    showModal('Expense record deleted successfully!');
+                } catch (e) {
+                    console.error("Error deleting expense: ", e);
+                    showModal('Error deleting expense record. Please try again.');
+                }
+            }
+        }
+
+        // --- Office Expenses Logic ---
+        const officeExpensesForm = document.getElementById('office-expenses-form');
+        const officeExpensesList = document.getElementById('office-expenses-list');
+        const officeTotals = { rent: 0, bills: 0, salary: 0, other: 0, total: 0 };
+        
+        officeExpensesForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(officeExpensesForm);
+            const data = Object.fromEntries(formData.entries());
+            data.date = new Date().toISOString().split('T')[0]; // Auto-set date
+            
+            try {
+                await addDoc(getCollection('office_expenses'), data);
+                showModal('Office expense added successfully!');
+                officeExpensesForm.reset();
+            } catch (e) {
+                console.error("Error adding office expense: ", e);
+                showModal('Error saving office expense. Please try again.');
+            }
+        });
+
+        function loadOfficeExpenses() {
+            const q = query(getCollection('office_expenses'));
+            
+            onSnapshot(q, (querySnapshot) => {
+                officeExpensesList.innerHTML = '';
+                const expenses = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+                // Group expenses by category
+                const groupedExpenses = expenses.reduce((acc, expense) => {
+                    const type = expense.expense_type;
+                    if (!acc[type]) acc[type] = [];
+                    acc[type].push(expense);
+                    return acc;
+                }, {});
+
+                // Calculate totals
+                const newTotals = { rent: 0, bills: 0, salary: 0, other: 0, total: 0 };
+                Object.keys(groupedExpenses).forEach(type => {
+                    const total = groupedExpenses[type].reduce((sum, exp) => sum + parseFloat(exp.amount), 0);
+                    if (newTotals[type.toLowerCase()]) {
+                        newTotals[type.toLowerCase()] = total;
+                    }
+                });
+                newTotals.total = newTotals.rent + newTotals.bills + newTotals.salary + newTotals.other;
+                
+                document.getElementById('office-rent-total').textContent = `₹${newTotals.rent.toFixed(2)}`;
+                document.getElementById('office-bills-total').textContent = `₹${newTotals.bills.toFixed(2)}`;
+                document.getElementById('office-salary-total').textContent = `₹${newTotals.salary.toFixed(2)}`;
+                document.getElementById('office-other-total').textContent = `₹${newTotals.other.toFixed(2)}`;
+                document.getElementById('office-total-total').textContent = `₹${newTotals.total.toFixed(2)}`;
+
+                // Render lists for each category
+                Object.keys(groupedExpenses).forEach(type => {
+                    const totalAmount = groupedExpenses[type].reduce((sum, exp) => sum + parseFloat(exp.amount), 0);
+                    const categoryDiv = document.createElement('div');
+                    categoryDiv.className = 'bg-gray-800 rounded-lg p-4 mb-4';
+                    categoryDiv.innerHTML = `
+                        <div class="flex justify-between items-center mb-2">
+                            <h4 class="font-bold text-lg text-accent-blue">${type} Expenses</h4>
+                            <span class="text-white">Total: ₹${totalAmount.toFixed(2)}</span>
+                        </div>
+                        <ul class="space-y-2">
+                            ${groupedExpenses[type].map(exp => `
+                                <li class="flex justify-between items-center bg-[#151515] p-2 rounded-md">
+                                    <div class="text-sm">
+                                        <p>${exp.date}</p>
+                                        <p class="text-gray-400">${exp.details}</p>
+                                    </div>
+                                    <div class="flex items-center space-x-2">
+                                        <p class="font-semibold text-white">₹${exp.amount}</p>
+                                        <button class="delete-office-expense-btn text-red-500 hover:text-red-700 transition-colors duration-200" data-id="${exp.id}"><i class="fas fa-trash-alt"></i></button>
+                                    </div>
+                                </li>
+                            `).join('')}
+                        </ul>
+                    `;
+                    officeExpensesList.appendChild(categoryDiv);
+                    
+                    // Attach event listeners for delete buttons
+                    categoryDiv.querySelectorAll('.delete-office-expense-btn').forEach(button => {
+                        button.addEventListener('click', () => deleteOfficeExpense(button.dataset.id));
+                    });
+                });
+            });
+        }
+        
+        async function deleteOfficeExpense(id) {
+            if (confirm('Are you sure you want to delete this office expense record?')) {
+                try {
+                    await deleteDoc(doc(getCollection('office_expenses'), id));
+                    showModal('Office expense record deleted successfully!');
+                } catch (e) {
+                    console.error("Error deleting office expense: ", e);
+                    showModal('Error deleting office expense record. Please try again.');
+                }
+            }
+        }
+    </script>
+    
+    <div class="main-container">
+        <!-- Header/Navigation Bar -->
+        <header class="bg-[#2a2a2a] p-4 shadow-lg sticky top-0 z-50 rounded-b-lg">
+            <div class="container mx-auto flex justify-between items-center">
+                <h1 class="text-2xl font-bold text-white">KTS Transport</h1>
+                <nav>
+                    <ul class="flex space-x-4">
+                        <li><a href="#" data-section="home" class="nav-link py-2 px-4 rounded-full font-semibold transition-colors duration-200 bg-accent-blue">Home</a></li>
+                        <li><a href="#" data-section="vehicles" class="nav-link py-2 px-4 rounded-full font-semibold transition-colors duration-200 bg-gray-800 hover:bg-accent-blue">Vehicles & Drivers</a></li>
+                        <li><a href="#" data-section="trips" class="nav-link py-2 px-4 rounded-full font-semibold transition-colors duration-200 bg-gray-800 hover:bg-accent-blue">Trips</a></li>
+                        <li><a href="#" data-section="vehicle-expenses" class="nav-link py-2 px-4 rounded-full font-semibold transition-colors duration-200 bg-gray-800 hover:bg-accent-blue">Vehicle Expenses</a></li>
+                        <li><a href="#" data-section="office-expenses" class="nav-link py-2 px-4 rounded-full font-semibold transition-colors duration-200 bg-gray-800 hover:bg-accent-blue">Office Expenses</a></li>
+                    </ul>
+                </nav>
+            </div>
+        </header>
+
+        <!-- Main Content Area -->
+        <main class="flex-grow scroll-container">
+            <!-- Home Section -->
+            <section id="home" class="py-12 px-6 lg:px-12">
+                <div class="text-center mb-12">
+                    <h2 class="text-5xl font-extrabold text-white mb-2">Welcome to KTS Transport</h2>
+                    <p class="text-xl text-gray-400">Manage your transport business with ease.</p>
+                </div>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
+                    <a href="#" data-section="vehicles" class="nav-link bg-gray-800 p-8 rounded-lg shadow-md hover:bg-accent-blue transition-all duration-300 transform hover:-translate-y-2">
+                        <div class="flex flex-col items-center">
+                            <i class="fas fa-truck text-5xl text-accent-blue mb-4"></i>
+                            <h3 class="text-2xl font-bold text-white mb-2">Vehicles & Drivers</h3>
+                            <p class="text-gray-400 text-center">Manage vehicle and driver details.
+                            </p>
+                        </div>
+                    </a>
+                    <a href="#" data-section="trips" class="nav-link bg-gray-800 p-8 rounded-lg shadow-md hover:bg-accent-blue transition-all duration-300 transform hover:-translate-y-2">
+                        <div class="flex flex-col items-center">
+                            <i class="fas fa-route text-5xl text-accent-blue mb-4"></i>
+                            <h3 class="text-2xl font-bold text-white mb-2">Trips</h3>
+                            <p class="text-gray-400 text-center">Log and track all your trip information.</p>
+                        </div>
+                    </a>
+                    <a href="#" data-section="vehicle-expenses" class="nav-link bg-gray-800 p-8 rounded-lg shadow-md hover:bg-accent-blue transition-all duration-300 transform hover:-translate-y-2">
+                        <div class="flex flex-col items-center">
+                            <i class="fas fa-gas-pump text-5xl text-accent-blue mb-4"></i>
+                            <h3 class="text-2xl font-bold text-white mb-2">Vehicle Expenses</h3>
+                            <p class="text-gray-400 text-center">Record and analyze all vehicle-related expenses.</p>
+                        </div>
+                    </a>
+                    <a href="#" data-section="office-expenses" class="nav-link bg-gray-800 p-8 rounded-lg shadow-md hover:bg-accent-blue transition-all duration-300 transform hover:-translate-y-2">
+                        <div class="flex flex-col items-center">
+                            <i class="fas fa-building text-5xl text-accent-blue mb-4"></i>
+                            <h3 class="text-2xl font-bold text-white mb-2">Office Expenses</h3>
+                            <p class="text-gray-400 text-center">Keep track of all your office expenditures.</p>
+                        </div>
+                    </a>
+                </div>
+            </section>
+
+            <!-- Vehicles & Drivers Section -->
+            <section id="vehicles" class="hidden py-8 px-6 lg:px-12">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-3xl font-bold text-white">Vehicles & Drivers</h2>
+                    <button id="add-vehicle-btn" class="bg-accent-blue text-white font-bold py-2 px-4 rounded-full hover:bg-blue-600 transition-colors duration-200">
+                        <i class="fas fa-plus mr-2"></i>Add Vehicle
+                    </button>
+                </div>
+                <div id="vehicles-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <!-- Vehicle cards will be injected here by JavaScript -->
+                </div>
+            </section>
+            
+            <!-- Add/Edit Vehicle Section (hidden by default) -->
+            <section id="add-vehicle-section" class="hidden py-8 px-6 lg:px-12">
+                <div class="flex justify-between items-center mb-6">
+                    <button id="back-to-vehicles" class="text-accent-blue hover:underline">
+                        <i class="fas fa-arrow-left mr-2"></i>Back to Vehicles
+                    </button>
+                    <h2 id="vehicle-form-title" class="text-3xl font-bold text-white">Add New Vehicle</h2>
+                </div>
+                <form id="add-vehicle-form" class="bg-gray-800 p-8 rounded-lg shadow-md max-w-2xl mx-auto space-y-4">
+                    <input type="hidden" name="id">
+                    <div>
+                        <label for="vehicle_name" class="block text-white mb-2">Vehicle Name</label>
+                        <input type="text" id="vehicle_name" name="vehicle_name" required class="w-full">
+                    </div>
+                    <div>
+                        <label for="reg_no" class="block text-white mb-2">Registration Number</label>
+                        <input type="text" id="reg_no" name="reg_no" required class="w-full">
+                    </div>
+                    <h3 class="text-xl font-semibold text-accent-blue pt-4">Expiry Dates</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label for="ins_expiry" class="block text-white mb-2">Insurance Expiry</label>
+                            <input type="date" id="ins_expiry" name="ins_expiry" class="w-full">
+                        </div>
+                        <div>
+                            <label for="fitness_expiry" class="block text-white mb-2">Fitness Expiry</label>
+                            <input type="date" id="fitness_expiry" name="fitness_expiry" class="w-full">
+                        </div>
+                        <div>
+                            <label for="puc_expiry" class="block text-white mb-2">PUC Expiry</label>
+                            <input type="date" id="puc_expiry" name="puc_expiry" class="w-full">
+                        </div>
+                    </div>
+                    <h3 class="text-xl font-semibold text-accent-blue pt-4">Driver Details</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label for="driver_name" class="block text-white mb-2">Driver Name</label>
+                            <input type="text" id="driver_name" name="driver_name" class="w-full">
+                        </div>
+                        <div>
+                            <label for="driver_contact" class="block text-white mb-2">Contact Number</label>
+                            <input type="tel" id="driver_contact" name="driver_contact" class="w-full">
+                        </div>
+                        <div>
+                            <label for="driver_alt_contact" class="block text-white mb-2">Alt. Contact</label>
+                            <input type="tel" id="driver_alt_contact" name="driver_alt_contact" class="w-full">
+                        </div>
+                        <div>
+                            <label for="driver_experience" class="block text-white mb-2">Experience (Years)</label>
+                            <input type="number" id="driver_experience" name="driver_experience" class="w-full">
+                        </div>
+                        <div class="md:col-span-2">
+                            <label for="driver_adhar" class="block text-white mb-2">Aadhaar No.</label>
+                            <input type="text" id="driver_adhar" name="driver_adhar" class="w-full">
+                        </div>
+                    </div>
+                    <h3 class="text-xl font-semibold text-accent-blue pt-4">Loan Details</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label for="loan_total" class="block text-white mb-2">Total Loan Amount</label>
+                            <input type="number" id="loan_total" name="loan_total" class="w-full">
+                        </div>
+                        <div>
+                            <label for="loan_paid" class="block text-white mb-2">Amount Paid</label>
+                            <input type="number" id="loan_paid" name="loan_paid" class="w-full">
+                        </div>
+                    </div>
+                    <button type="submit" class="bg-accent-blue text-white font-bold py-3 px-6 rounded-full w-full hover:bg-blue-600 transition-colors duration-200 mt-6">Save Vehicle</button>
+                </form>
+            </section>
+            
+            <!-- Trips Section -->
+            <section id="trips" class="hidden py-8 px-6 lg:px-12">
+                <h2 class="text-3xl font-bold text-white mb-6">Trip Management</h2>
+                
+                <!-- Trip Summary Totals -->
+                <div class="bg-gray-800 p-6 rounded-lg shadow-md mb-6 grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div>
+                        <p class="text-gray-400">Total Income</p>
+                        <p id="trip-income-total" class="text-2xl font-bold text-green-400">₹0.00</p>
+                    </div>
+                    <div>
+                        <p class="text-gray-400">Total Expense</p>
+                        <p id="trip-expense-total" class="text-2xl font-bold text-red-400">₹0.00</p>
+                    </div>
+                    <div>
+                        <p class="text-gray-400">Total Profit/Loss</p>
+                        <p id="trip-profit-total" class="text-2xl font-bold">₹0.00</p>
+                    </div>
+                </div>
+
+                <!-- Filters and Add Trip Form -->
+                <div class="bg-gray-800 p-6 rounded-lg shadow-md mb-6">
+                    <h3 class="text-xl font-bold text-accent-blue mb-4">Add New Trip</h3>
+                    <form id="trips-form" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <input type="text" name="destination" placeholder="Destination" required>
+                        <select id="trip-vehicle-filter" name="vehicle">
+                            <option value="">Select Vehicle</option>
+                        </select>
+                        <input type="number" name="income" placeholder="Income" required>
+                        <input type="number" name="expense" placeholder="Expense" required>
+                        <button type="submit" class="bg-accent-blue text-white font-bold py-2 px-4 rounded-full hover:bg-blue-600 transition-colors duration-200">Add Trip</button>
+                    </form>
+                </div>
+                
+                <!-- Filters -->
+                <div class="bg-gray-800 p-6 rounded-lg shadow-md mb-6">
+                    <h3 class="text-xl font-bold text-accent-blue mb-4">Filter Trips</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <select id="trip-date-filter" name="date-filter" class="w-full">
+                            <option value="All">All Time</option>
+                            <option value="Last 7 Days">Last 7 Days</option>
+                            <option value="Last 30 Days">Last 30 Days</option>
+                            <option value="Last 6 Months">Last 6 Months</option>
+                            <option value="Last 12 Months">Last 12 Months</option>
+                        </select>
+                        <button id="filter-trips-btn" class="bg-gray-700 text-white font-bold py-2 px-4 rounded-full hover:bg-gray-600 transition-colors duration-200">Apply Filters</button>
+                    </div>
+                </div>
+                
+                <!-- Trips Table -->
+                <div class="overflow-x-auto bg-gray-800 rounded-lg shadow-md">
+                    <table class="min-w-full text-left">
+                        <thead>
+                            <tr class="bg-gray-700 text-sm font-semibold uppercase tracking-wider">
+                                <th class="py-3 px-4">Date</th>
+                                <th class="py-3 px-4">Vehicle</th>
+                                <th class="py-3 px-4">Destination</th>
+                                <th class="py-3 px-4">Income</th>
+                                <th class="py-3 px-4">Expense</th>
+                                <th class="py-3 px-4">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trips-table-body">
+                            <!-- Trip data will be injected here by JavaScript -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Vehicle Expenses Section -->
+            <section id="vehicle-expenses" class="hidden py-8 px-6 lg:px-12">
+                <h2 class="text-3xl font-bold text-white mb-6">Vehicle Expenses</h2>
+                
+                <!-- Vehicle Expense Summary Total -->
+                <div class="bg-gray-800 p-6 rounded-lg shadow-md mb-6">
+                    <p class="text-gray-400">Total Expenses</p>
+                    <p id="vehicle-expense-total" class="text-2xl font-bold text-red-400">₹0.00</p>
+                </div>
+
+                <!-- Add Expense Form -->
+                <div class="bg-gray-800 p-6 rounded-lg shadow-md mb-6">
+                    <h3 class="text-xl font-bold text-accent-blue mb-4">Add New Expense</h3>
+                    <form id="vehicle-expenses-form" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <select id="vehicle-expenses-vehicle-filter" name="vehicle">
+                            <option value="">Select Vehicle</option>
+                        </select>
+                        <select name="expense_type" required>
+                            <option value="">Select Expense Type</option>
+                            <option value="Fuel">Fuel</option>
+                            <option value="Maintenance">Maintenance</option>
+                            <option value="Toll">Toll</option>
+                            <option value="Service">Service</option>
+                            <option value="Other">Other</option>
+                        </select>
+                        <input type="number" name="amount" placeholder="Amount" required>
+                        <input type="text" name="details" placeholder="Details (e.g., liters of fuel)">
+                        <button type="submit" class="bg-accent-blue text-white font-bold py-2 px-4 rounded-full hover:bg-blue-600 transition-colors duration-200">Add Expense</button>
+                    </form>
+                </div>
+
+                <!-- Filters -->
+                <div class="bg-gray-800 p-6 rounded-lg shadow-md mb-6">
+                    <h3 class="text-xl font-bold text-accent-blue mb-4">Filter Expenses</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <select id="vehicle-expenses-date-filter" name="date-filter" class="w-full">
+                            <option value="All">All Time</option>
+                            <option value="Last 7 Days">Last 7 Days</option>
+                            <option value="Last 30 Days">Last 30 Days</option>
+                            <option value="Last 6 Months">Last 6 Months</option>
+                            <option value="Last 12 Months">Last 12 Months</option>
+                        </select>
+                        <button id="filter-vehicle-expenses-btn" class="bg-gray-700 text-white font-bold py-2 px-4 rounded-full hover:bg-gray-600 transition-colors duration-200">Apply Filters</button>
+                    </div>
+                </div>
+
+                <!-- Expenses Table -->
+                <div class="overflow-x-auto bg-gray-800 rounded-lg shadow-md">
+                    <table class="min-w-full text-left">
+                        <thead>
+                            <tr class="bg-gray-700 text-sm font-semibold uppercase tracking-wider">
+                                <th class="py-3 px-4">Date</th>
+                                <th class="py-3 px-4">Vehicle</th>
+                                <th class="py-3 px-4">Type</th>
+                                <th class="py-3 px-4">Details</th>
+                                <th class="py-3 px-4">Amount</th>
+                                <th class="py-3 px-4">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="vehicle-expenses-table-body">
+                            <!-- Expense data will be injected here by JavaScript -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Office Expenses Section -->
+            <section id="office-expenses" class="hidden py-8 px-6 lg:px-12">
+                <h2 class="text-3xl font-bold text-white mb-6">Office Expenses</h2>
+                
+                <!-- Office Expense Summary Totals -->
+                <div class="bg-gray-800 p-6 rounded-lg shadow-md mb-6 grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-6">
+                    <div>
+                        <p class="text-gray-400">Rent</p>
+                        <p id="office-rent-total" class="text-xl font-bold text-white">₹0.00</p>
+                    </div>
+                    <div>
+                        <p class="text-gray-400">Bills</p>
+                        <p id="office-bills-total" class="text-xl font-bold text-white">₹0.00</p>
+                    </div>
+                    <div>
+                        <p class="text-gray-400">Salary</p>
+                        <p id="office-salary-total" class="text-xl font-bold text-white">₹0.00</p>
+                    </div>
+                    <div>
+                        <p class="text-gray-400">Other</p>
+                        <p id="office-other-total" class="text-xl font-bold text-white">₹0.00</p>
+                    </div>
+                    <div>
+                        <p class="text-gray-400">Total</p>
+                        <p id="office-total-total" class="text-2xl font-bold text-accent-blue">₹0.00</p>
+                    </div>
+                </div>
+
+                <!-- Add Expense Form -->
+                <div class="bg-gray-800 p-6 rounded-lg shadow-md mb-6">
+                    <h3 class="text-xl font-bold text-accent-blue mb-4">Add New Office Expense</h3>
+                    <form id="office-expenses-form" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <select name="expense_type" required>
+                            <option value="">Select Expense Type</option>
+                            <option value="Rent">Rent</option>
+                            <option value="Bills">Bills</option>
+                            <option value="Salary">Salary</option>
+                            <option value="Other">Other</option>
+                        </select>
+                        <input type="text" name="details" placeholder="Expense Details" required>
+                        <input type="number" name="amount" placeholder="Amount" required>
+                        <button type="submit" class="bg-accent-blue text-white font-bold py-2 px-4 rounded-full hover:bg-blue-600 transition-colors duration-200">Add Expense</button>
+                    </form>
+                </div>
+
+                <!-- Expense Lists -->
+                <div id="office-expenses-list">
+                    <!-- Office expense lists grouped by category will be injected here -->
+                </div>
+            </section>
+        </main>
+        
+        <!-- Footer with user ID -->
+        <footer class="bg-[#2a2a2a] p-4 text-center rounded-t-lg shadow-inner">
+            <p id="user-id-display" class="text-gray-400 text-sm"></p>
+        </footer>
+    </div>
+
+    <!-- Modal for messages -->
+    <div id="modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50">
+        <div class="bg-gray-800 p-6 rounded-lg shadow-lg max-w-sm w-full text-center">
+            <p id="modal-message" class="text-white text-lg font-semibold mb-4"></p>
+            <button id="close-modal-btn" class="bg-accent-blue text-white font-bold py-2 px-4 rounded-full hover:bg-blue-600 transition-colors duration-200">OK</button>
+        </div>
+    </div>
+</body>
+</html>
